@@ -1,4 +1,4 @@
-module github.com/MainPoser/informer-mongo
+module github.com/MainPoser/informer-extra
 
 go 1.17
 
