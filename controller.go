@@ -1,43 +1,29 @@
 package informer_mongo
 
 import (
-	"context"
 	"fmt"
-	"log"
-	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/mongo"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	pkg_runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 )
 
-type BusinessAction interface {
-	Exec(key string, object interface{}) error
-}
-
 // Controller demonstrates how to implement a controller with client-go.
 type Controller struct {
-	indexer        cache.Indexer
-	queue          workqueue.RateLimitingInterface
-	informer       cache.Controller
-	extraChan      chan watch.Event
-	srw            sync.RWMutex
-	businessAction BusinessAction
+	indexer         cache.Indexer
+	queue           workqueue.RateLimitingInterface
+	informer        cache.Controller
+	businessFunc    func(key string, object interface{}) error
+	loopDoneErrFunc func(err error, key interface{}, obj interface{})
+	requeueTimes    int
 }
 
 // NewController creates a new Controller.
-func NewController(collection *mongo.Collection, objType pkg_runtime.Object, newListFunc func(cur *mongo.Cursor) pkg_runtime.Object, action BusinessAction) *Controller {
-	// create the pod watcher
-	events := make(chan watch.Event)
-	listWatchFromMongo := NewListWatchFromMongo(collection, newListFunc, events, fields.Everything())
+func NewController(lw cache.ListerWatcher, requeueTimes int, objType pkg_runtime.Object, businessFunc func(key string, object interface{}) error) *Controller {
 
 	// create the workqueue
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
@@ -46,7 +32,7 @@ func NewController(collection *mongo.Collection, objType pkg_runtime.Object, new
 	// whenever the cache is updated, the pod key is added to the workqueue.
 	// Note that when we finally process the item from the workqueue, we might see a newer version
 	// of the Pod than the version which was responsible for triggering the update.
-	indexer, informer := cache.NewIndexerInformer(listWatchFromMongo, objType, 0, cache.ResourceEventHandlerFuncs{
+	indexer, informer := cache.NewIndexerInformer(lw, objType, 0, cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
 			if err == nil {
@@ -71,10 +57,10 @@ func NewController(collection *mongo.Collection, objType pkg_runtime.Object, new
 
 	controller := &Controller{}
 	controller.indexer = indexer
-	controller.extraChan = events
 	controller.queue = queue
 	controller.informer = informer
-	controller.businessAction = action
+	controller.businessFunc = businessFunc
+	controller.requeueTimes = requeueTimes
 	return controller
 }
 
@@ -99,16 +85,16 @@ func (c *Controller) processNextItem() bool {
 		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
 		fmt.Printf("Pod %s does not exist anymore\n", key)
 	} else {
-		err = c.businessAction.Exec(key.(string), obj)
+		err = c.businessFunc(key.(string), obj)
 	}
 
 	// Handle the error if something went wrong during the execution of the business logic
-	c.handleErr(err, key)
+	c.handleErr(err, key, obj)
 	return true
 }
 
 // handleErr checks if an error happened and makes sure we will retry later.
-func (c *Controller) handleErr(err error, key interface{}) {
+func (c *Controller) handleErr(err error, key interface{}, obj interface{}) {
 	if err == nil {
 		// Forget about the #AddRateLimited history of the key on every successful synchronization.
 		// This ensures that future processing of updates for this key is not delayed because of
@@ -118,7 +104,7 @@ func (c *Controller) handleErr(err error, key interface{}) {
 	}
 
 	// This controller retries 5 times if something goes wrong. After that, it stops trying.
-	if c.queue.NumRequeues(key) < 5 {
+	if c.queue.NumRequeues(key) < c.requeueTimes {
 		klog.Infof("Error syncing pod %v: %v", key, err)
 
 		// Re-enqueue the key rate limited. Based on the rate limiter on the
@@ -129,8 +115,8 @@ func (c *Controller) handleErr(err error, key interface{}) {
 
 	c.queue.Forget(key)
 	// Report to an external entity that, even after several retries, we could not successfully process this key
-	runtime.HandleError(err)
-	klog.Infof("Dropping pod %q out of the queue: %v", key, err)
+	c.loopDoneErrFunc(err, key, obj)
+	klog.Infof("Dropping obj %q out of the queue: %v", key, err)
 }
 
 // Run begins watching and syncing.
@@ -162,25 +148,7 @@ func (c *Controller) runWorker() {
 	}
 }
 
-// NewListWatchFromMongo creates a new ListWatch from the specified mongo client, resource, namespace and field selector.
-func NewListWatchFromMongo(c *mongo.Collection, newListFunc func(cur *mongo.Cursor) pkg_runtime.Object, extraChan chan watch.Event, fieldSelector fields.Selector) *cache.ListWatch {
-	optionsModifier := func(options *meta_v1.ListOptions) {
-		options.FieldSelector = fieldSelector.String()
-	}
-	listFunc := func(options meta_v1.ListOptions) (pkg_runtime.Object, error) {
-		optionsModifier(&options)
-		find, err := c.Find(context.Background(), "")
-		object := newListFunc(find)
-		if err != nil {
-			log.Printf("list %s failed: %v", object.GetObjectKind(), err)
-		}
-		return object, nil
-	}
-	watchFunc := func(options meta_v1.ListOptions) (watch.Interface, error) {
-		options.Watch = true
-		optionsModifier(&options)
-		watch.NewProxyWatcher(extraChan)
-		return watch.NewProxyWatcher(extraChan), nil
-	}
+// NewListWatchFromFunc creates a new ListWatch from the specified func
+func NewListWatchFromFunc(listFunc cache.ListFunc, watchFunc cache.WatchFunc) *cache.ListWatch {
 	return &cache.ListWatch{ListFunc: listFunc, WatchFunc: watchFunc}
 }
