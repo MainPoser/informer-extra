@@ -20,7 +20,7 @@ type Controller struct {
 	queue           workqueue.RateLimitingInterface
 	informer        cache.Controller
 	objType         pkg_runtime.Object
-	businessFunc    func(key string, object interface{}) error
+	businessFunc    func(key string, count int, object interface{}) error
 	loopDoneErrFunc func(err error, key interface{}, obj interface{})
 	requeueTimes    int
 }
@@ -30,7 +30,7 @@ func NewController(
 	lw cache.ListerWatcher,
 	requeueTimes int,
 	objType pkg_runtime.Object,
-	businessFunc func(key string, object interface{}) error,
+	businessFunc func(key string, count int, object interface{}) error,
 	loopDoneErrFunc func(err error, key interface{}, obj interface{}),
 	transformer cache.TransformFunc,
 	shouldReSync cache.ShouldResyncFunc,
@@ -106,7 +106,7 @@ func (c *Controller) processNextItem() bool {
 		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
 		fmt.Printf("Pod %s does not exist anymore\n", key)
 	} else {
-		err = c.businessFunc(key.(string), obj)
+		err = c.businessFunc(key.(string), c.queue.NumRequeues(key), obj)
 	}
 
 	// Handle the error if something went wrong during the execution of the business logic

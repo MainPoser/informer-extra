@@ -60,7 +60,7 @@ func TestMongoController(t *testing.T) {
 		// custom your watch , watch chan、mongo、mysql、kafka whatever,just return meta_v1.ObjectMeta
 		return watch.NewProxyWatcher(eventsCh), nil
 	}
-	bf := func(key string, object interface{}) error {
+	bf := func(key string, count int, object interface{}) error {
 		// if return err, will requeue until requeueTimes
 		// handle your business logic, just print here
 		fmt.Printf("get name %s\n", object.(*demo).Name)
