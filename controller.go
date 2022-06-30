@@ -1,4 +1,4 @@
-package informer_mongo
+package informer_extra
 
 import (
 	"errors"
