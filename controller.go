@@ -1,6 +1,7 @@
 package informer_mongo
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -23,7 +24,18 @@ type Controller struct {
 }
 
 // NewController creates a new Controller.
-func NewController(lw cache.ListerWatcher, requeueTimes int, objType pkg_runtime.Object, businessFunc func(key string, object interface{}) error) *Controller {
+func NewController(
+	lw cache.ListerWatcher,
+	requeueTimes int,
+	objType pkg_runtime.Object,
+	businessFunc func(key string, object interface{}) error,
+	loopDoneErrFunc func(err error, key interface{}, obj interface{}),
+	transformer cache.TransformFunc,
+	shouldReSync cache.ShouldResyncFunc,
+	watchErrorHandler cache.WatchErrorHandler,
+	retryOnError bool,
+	watchListPageSize int64,
+) *Controller {
 
 	// create the workqueue
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
@@ -32,7 +44,21 @@ func NewController(lw cache.ListerWatcher, requeueTimes int, objType pkg_runtime
 	// whenever the cache is updated, the pod key is added to the workqueue.
 	// Note that when we finally process the item from the workqueue, we might see a newer version
 	// of the Pod than the version which was responsible for triggering the update.
-	indexer, informer := cache.NewIndexerInformer(lw, objType, 0, cache.ResourceEventHandlerFuncs{
+	clientState := cache.NewIndexer(cache.DeletionHandlingMetaNamespaceKeyFunc, cache.Indexers{})
+	informer := newInformer(lw, objType, 0, newResourceEventHandlerFunc(queue), clientState, transformer, shouldReSync, watchErrorHandler, retryOnError, watchListPageSize)
+
+	controller := &Controller{}
+	controller.indexer = clientState
+	controller.queue = queue
+	controller.informer = informer
+	controller.businessFunc = businessFunc
+	controller.requeueTimes = requeueTimes
+	controller.loopDoneErrFunc = loopDoneErrFunc
+	return controller
+}
+
+func newResourceEventHandlerFunc(queue workqueue.RateLimitingInterface) cache.ResourceEventHandlerFuncs {
+	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
 			if err == nil {
@@ -53,15 +79,7 @@ func NewController(lw cache.ListerWatcher, requeueTimes int, objType pkg_runtime
 				queue.Add(key)
 			}
 		},
-	}, cache.Indexers{})
-
-	controller := &Controller{}
-	controller.indexer = indexer
-	controller.queue = queue
-	controller.informer = informer
-	controller.businessFunc = businessFunc
-	controller.requeueTimes = requeueTimes
-	return controller
+	}
 }
 
 func (c *Controller) processNextItem() bool {
@@ -151,4 +169,86 @@ func (c *Controller) runWorker() {
 // NewListWatchFromFunc creates a new ListWatch from the specified func
 func NewListWatchFromFunc(listFunc cache.ListFunc, watchFunc cache.WatchFunc) *cache.ListWatch {
 	return &cache.ListWatch{ListFunc: listFunc, WatchFunc: watchFunc}
+}
+
+func newInformer(
+	lw cache.ListerWatcher,
+	objType pkg_runtime.Object,
+	reSyncPeriod time.Duration,
+	h cache.ResourceEventHandler,
+	clientState cache.Store,
+	transformer cache.TransformFunc,
+	shouldReSync cache.ShouldResyncFunc,
+	watchErrorHandler cache.WatchErrorHandler,
+	retryOnError bool,
+	watchListPageSize int64,
+) cache.Controller {
+	// This will hold incoming changes. Note how we pass clientState in as a
+	// KeyLister, that way reSync operations will result in the correct set
+	// of update/delete deltas.
+	fifo := cache.NewDeltaFIFOWithOptions(cache.DeltaFIFOOptions{
+		KnownObjects:          clientState,
+		EmitDeltaTypeReplaced: true,
+	})
+
+	cfg := &cache.Config{
+		Queue:         fifo,
+		ListerWatcher: lw,
+		Process: func(obj interface{}) error {
+			if deltas, ok := obj.(cache.Deltas); ok {
+				return processDeltas(h, clientState, transformer, deltas)
+			}
+			return errors.New("object given as Process argument is not Deltas")
+		},
+		ObjectType:        objType,
+		FullResyncPeriod:  reSyncPeriod,
+		ShouldResync:      shouldReSync,
+		RetryOnError:      retryOnError,
+		WatchErrorHandler: watchErrorHandler,
+		WatchListPageSize: watchListPageSize,
+	}
+	return cache.New(cfg)
+}
+
+// Multiplexes updates in the form of a list of Deltas into a Store, and informs
+// a given handler of events OnUpdate, OnAdd, OnDelete
+func processDeltas(
+	// Object which receives event notifications from the given deltas
+	handler cache.ResourceEventHandler,
+	clientState cache.Store,
+	transformer cache.TransformFunc,
+	deltas cache.Deltas,
+) error {
+	// from oldest to newest
+	for _, d := range deltas {
+		obj := d.Object
+		if transformer != nil {
+			var err error
+			obj, err = transformer(obj)
+			if err != nil {
+				return err
+			}
+		}
+
+		switch d.Type {
+		case cache.Sync, cache.Replaced, cache.Added, cache.Updated:
+			if old, exists, err := clientState.Get(obj); err == nil && exists {
+				if err := clientState.Update(obj); err != nil {
+					return err
+				}
+				handler.OnUpdate(old, obj)
+			} else {
+				if err := clientState.Add(obj); err != nil {
+					return err
+				}
+				handler.OnAdd(obj)
+			}
+		case cache.Deleted:
+			if err := clientState.Delete(obj); err != nil {
+				return err
+			}
+			handler.OnDelete(obj)
+		}
+	}
+	return nil
 }
