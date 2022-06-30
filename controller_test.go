@@ -2,38 +2,32 @@ package informer_mongo
 
 import (
 	"fmt"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/watch"
 	"strconv"
 	"testing"
+	"time"
+
+	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 )
 
-type DemoList struct {
-	meta_v1.ObjectMeta
-	meta_v1.ListMeta
-	Items []Demo
+type demoList struct {
+	meta_v1.TypeMeta `json:",inline"`
+	meta_v1.ListMeta `json:"metadata,omitempty"`
+	Items            []demo
 }
 
-func (d *DemoList) GetObjectKind() schema.ObjectKind {
-	return d.GetObjectKind()
-}
-
-func (d *DemoList) DeepCopyObject() runtime.Object {
+func (d *demoList) DeepCopyObject() runtime.Object {
 	return d
 }
 
-type Demo struct {
-	meta_v1.ObjectMeta
-	Spec string
+type demo struct {
+	meta_v1.TypeMeta   `json:",inline"`
+	meta_v1.ObjectMeta `json:"metadata,omitempty"`
+	Spec               string
 }
 
-func (d *Demo) GetObjectKind() schema.ObjectKind {
-	return d.GetObjectKind()
-}
-
-func (d *Demo) DeepCopyObject() runtime.Object {
+func (d *demo) DeepCopyObject() runtime.Object {
 	return d
 }
 
@@ -42,9 +36,9 @@ func TestMongoController(t *testing.T) {
 	eventsCh := make(chan watch.Event)
 	lf := func(options meta_v1.ListOptions) (runtime.Object, error) {
 		// you can list your resource free,just return meta_v1.ListMeta
-		ds := make([]Demo, 0)
-		for i := 0; i < 100; i++ {
-			d := Demo{
+		ds := make([]demo, 0)
+		for i := 0; i < 10; i++ {
+			d := demo{
 				ObjectMeta: meta_v1.ObjectMeta{
 					Name: "list" + strconv.Itoa(i),
 				},
@@ -52,9 +46,10 @@ func TestMongoController(t *testing.T) {
 			}
 			ds = append(ds, d)
 		}
-		dl := &DemoList{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name: "DemoList",
+		dl := &demoList{
+			TypeMeta: meta_v1.TypeMeta{
+				Kind:       "DemoList",
+				APIVersion: "main-poser/v1",
 			},
 			ListMeta: meta_v1.ListMeta{},
 			Items:    ds,
@@ -68,24 +63,28 @@ func TestMongoController(t *testing.T) {
 	bf := func(key string, object interface{}) error {
 		// if return err, will requeue until requeueTimes
 		// handle your business logic, just print here
-		fmt.Printf("get name %s\n", object.(*Demo).Name)
+		fmt.Printf("get name %s\n", object.(*demo).Name)
 		return nil
 	}
 	lef := func(err error, key interface{}, obj interface{}) {
 		// when requeueTimes loop done,and err != nil you will handle this
 		// just print here
-		fmt.Printf("key %s err %v obj %v\n", key, err, obj.(*Demo).Name)
+		fmt.Printf("key %s err %v obj %v\n", key, err, obj.(*demo).Name)
 	}
 	listWatchFromFunc := NewListWatchFromFunc(lf, wf)
-	controller := NewController(listWatchFromFunc, 10, &Demo{},
+	controller := NewController(listWatchFromFunc, 10, &demo{},
 		bf, lef, nil, nil, nil, true, 0)
 	go controller.Run(1, stopCh)
 
 	// put data to eventsCh
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 10; i++ {
 		e := watch.Event{
 			Type: watch.Added,
-			Object: &Demo{
+			Object: &demo{
+				TypeMeta: meta_v1.TypeMeta{
+					Kind:       "Demo",
+					APIVersion: "main-poser/v1",
+				},
 				ObjectMeta: meta_v1.ObjectMeta{
 					Name: "watch" + strconv.Itoa(i),
 				},
@@ -96,5 +95,7 @@ func TestMongoController(t *testing.T) {
 	}
 
 	// hold forever
-	select {}
+	time.Sleep(time.Second * 5)
+
+	close(stopCh)
 }

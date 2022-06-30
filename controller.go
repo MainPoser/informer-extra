@@ -3,6 +3,7 @@ package informer_mongo
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	pkg_runtime "k8s.io/apimachinery/pkg/runtime"
@@ -18,6 +19,7 @@ type Controller struct {
 	indexer         cache.Indexer
 	queue           workqueue.RateLimitingInterface
 	informer        cache.Controller
+	objType         pkg_runtime.Object
 	businessFunc    func(key string, object interface{}) error
 	loopDoneErrFunc func(err error, key interface{}, obj interface{})
 	requeueTimes    int
@@ -54,6 +56,7 @@ func NewController(
 	controller.businessFunc = businessFunc
 	controller.requeueTimes = requeueTimes
 	controller.loopDoneErrFunc = loopDoneErrFunc
+	controller.objType = objType
 	return controller
 }
 
@@ -143,13 +146,13 @@ func (c *Controller) Run(workers int, stopCh chan struct{}) {
 
 	// Let the workers stop when we are done
 	defer c.queue.ShutDown()
-	klog.Info("Starting Pod controller")
+	klog.Infof("Starting %s controller", reflect.TypeOf(c.objType).Elem().Name())
 
 	go c.informer.Run(stopCh)
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
 	if !cache.WaitForCacheSync(stopCh, c.informer.HasSynced) {
-		runtime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
+		runtime.HandleError(errors.New(fmt.Sprintf("Timed out waiting for caches to sync %s", c.objType.GetObjectKind())))
 		return
 	}
 
@@ -158,7 +161,7 @@ func (c *Controller) Run(workers int, stopCh chan struct{}) {
 	}
 
 	<-stopCh
-	klog.Info("Stopping Pod controller")
+	klog.Infof("Stopping %s controller", reflect.TypeOf(c.objType).Elem().Name())
 }
 
 func (c *Controller) runWorker() {
