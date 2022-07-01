@@ -75,12 +75,7 @@ func newResourceEventHandlerFunc(queue workqueue.RateLimitingInterface) cache.Re
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			// IndexerInformer uses a delta queue, therefore for deletes we have to use this
-			// key function.
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				queue.Add(key)
-			}
+			// 直接删除数据，协同逻辑中不处理
 		},
 	}
 }
