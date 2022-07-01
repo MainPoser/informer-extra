@@ -216,7 +216,7 @@ func (c *Controller) processNextItem() bool {
 }
 
 // Run begins watching and syncing.
-func (c *Controller) Run(workers int, stopCh chan struct{}) {
+func (c *Controller) Run(workers int, stopCh <-chan struct{}) {
 	defer runtime.HandleCrash()
 
 	// Let the workers stop when we are done
